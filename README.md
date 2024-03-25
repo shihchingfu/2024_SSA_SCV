@@ -1,3 +1,5 @@
+The rendered slides can be viewed at https://topepo.github.io/2024_SSA_SCV.
+
 > Tutorial 1: Mar 26, 9:00-12:30 AEDT (6:00pm to 9:30pm EST)
 > Title: Introduction to Machine Learning with tidymodels
 > Presenter: Max Kuhn
