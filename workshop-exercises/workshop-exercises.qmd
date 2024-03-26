@@ -1,0 +1,297 @@
+---
+title: "SSA Workshop: Introduction to tidymodels"
+date: "26 March 2024"
+format: html
+---
+
+
+```{r}
+library(tidymodels)
+```
+
+```{r}
+# package conflict resolution
+
+tidymodels_prefer()
+theme_set(theme_bw())
+```
+
+
+```{r}
+glimpse(deliveries)
+```
+
+Our task is to try and predict the delivery time.
+
+```{r}
+deliveries |> 
+  ggplot() +
+  aes(x = time_to_delivery) +
+  geom_histogram(bins = 40)
+```
+
+```{r}
+deliveries |> 
+  select(starts_with("item")) |> 
+  rowSums() |> 
+  hist()
+```
+
+```{r}
+deliveries %>% 
+  pivot_longer(item_01:item_27, names_to = "item", values_to = "qty") %>% 
+  filter(qty != 0) %>% 
+  group_by(item) %>% 
+  summarise(mean_time = mean(time_to_delivery)) %>% 
+  ggplot() +
+  aes(y = item, x = mean_time) +
+  geom_bar(stat = "identity")
+```
+
+
+Bimodal response
+
+```{r}
+deliveries |> 
+  ggplot() +
+  aes(colour = day, y = time_to_delivery, x= hour) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(se = FALSE) +
+  scale_x_log10()
+```
+
+Looks like a non-linear interaction effect between hour and day.
+
+```{r}
+model1 <- lm(time_to_delivery ~ ., data = deliveries)
+summary(model1)
+```
+
+
+```{r}
+plot(model1)
+```
+
+```{r}
+model2 <- lm(log(time_to_delivery) ~ ., data = deliveries)
+summary(model2)
+```
+
+```{r}
+plot(model2)
+```
+
+
+```{r}
+deliveries_summed <- deliveries |> 
+  mutate(items_sum = rowSums(across(starts_with("item_")), na.rm = TRUE), .keep = "unused")
+```
+
+
+
+```{r}
+deliveries_summed |> 
+  ggplot() +
+  aes(x = items_sum) +
+  geom_histogram(bins = 12)
+```
+
+## Splitting data
+
+```{r}
+set.seed(1)
+delivery_split <- initial_validation_split(deliveries, 
+                prop = c(0.8, 0.1), 
+                strata = time_to_delivery) # defaults to quintiles
+
+delivery_train <- training(delivery_split)
+delivery_test <- testing(delivery_split)
+delivery_val <- validation(delivery_split)
+```
+
+
+## Fit a linear regression
+
+```{r}
+mod_spec <- linear_reg() # default engine is "lm"
+mod_fit <- mod_spec |> 
+  fit(time_to_delivery ~ ., data = delivery_train)
+tidy(mod_fit)
+```
+
+
+```{r}
+predict(mod_fit, head(delivery_val, 3)) # always returns a tibble
+```
+
+```{r}
+# a better way because it binds the original data
+augment(mod_fit, head(delivery_val, 3)) |> 
+  select(1:9)
+```
+
+```{r}
+augment(mod_fit, delivery_val) |> 
+  ggplot() +
+  aes(x = .pred, y = time_to_delivery) +
+  geom_abline(colour = "green", linetype = 2) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(se = FALSE) +
+  coord_obs_pred()
+```
+
+
+```{r}
+reg_metrics <- metric_set(rmse, rsq)
+
+augment(mod_fit, delivery_val) |> 
+  reg_metrics(time_to_delivery, .pred)
+```
+
+## Feature Engineering
+
+```{r}
+# records the attributes of the variables
+food_rec <- recipe(time_to_delivery ~., data = delivery_train)
+food_rec
+```
+
+```{r}
+# just a catalogue of the variables
+summary(food_rec)
+```
+
+
+
+```{r}
+# converting to indicator (dummy) variables
+food_rec <- recipe(time_to_delivery ~., data = delivery_train) |> 
+  step_dummy(all_factor_predictors()) |> 
+  step_spline_natural(hour, distance, deg_free = 5) # no interactions, parallel curves
+
+fitted_rec <- prep(food_rec, delivery_train)
+val_predictor <- bake(fitted_rec, delivery_val |> head(3))
+val_predictor
+```
+
+
+```{r}
+food_rec <- recipe(time_to_delivery ~., data = delivery_train) |> 
+  step_dummy(all_factor_predictors()) |> 
+  step_spline_natural(hour, distance, deg_free = 5) |> 
+  step_interact(~ starts_with("hour_"):starts_with("day_")) # will give me 30 more columns
+
+
+# use contains("_x_") to select the interaction terms
+```
+
+
+# Use a workflow
+
+```{r}
+lm_wflow <- workflow() |>  # cf scikitlearn pipelines
+  add_model(linear_reg()) |> 
+  add_recipe(food_rec)
+lm_wflow
+```
+
+
+
+```{r}
+lm_fit <- fit(lm_wflow, data = delivery_train)
+tidy(lm_fit) |> arrange(term)
+```
+
+
+```{r}
+val_rs <- validation_set(delivery_split) # an "r" set
+val_rs
+```
+
+```{r}
+lm_res <- lm_wflow |> 
+  fit_resamples(val_rs, control = control_resamples(save_pred = TRUE))
+lm_res
+```
+
+```{r}
+collect_metrics(lm_res)
+```
+
+c.f. 10-fold cross validation
+
+```{r}
+vfold_cv(delivery_train, v = 10)
+```
+
+
+```{r}
+lm_res |> 
+  collect_predictions() |> 
+  ggplot() +
+  aes(x = .pred, y = time_to_delivery) +
+  geom_abline(colour = "green", linetype = 2) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(se = FALSE) +
+  coord_obs_pred()
+```
+
+
+# Different Models
+
+```{r}
+library(rules)
+
+cubist_res <- cubist_rules() |> 
+  fit_resamples(
+    time_to_delivery ~ .,
+    resamples = val_rs,
+    control = control_resamples(save_pred = TRUE)
+  )
+```
+
+```{r}
+collect_metrics(cubist_res)
+```
+
+
+
+```{r}
+cubist_res |> 
+  collect_predictions() |> 
+  ggplot() +
+  aes(x = .pred, y = time_to_delivery) +
+  geom_abline(colour = "green", linetype = 2) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(se = FALSE) +
+  coord_obs_pred()
+```
+
+
+# Test Set
+
+```{r}
+cubist_wflow <- workflow(time_to_delivery ~ ., cubist_rules())
+
+cubist_final_res <- cubist_wflow |> last_fit(delivery_split)
+
+cubist_final_res
+```
+
+```{r}
+collect_metrics(cubist_final_res)
+```
+
+```{r}
+cubist_final_res |> 
+  collect_predictions() |> 
+  ggplot() +
+  aes(x = .pred, y = time_to_delivery) +
+  geom_abline(colour = "green", linetype = 2) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(se = FALSE) +
+  coord_obs_pred()
+```
+
+
+
